@@ -1,0 +1,5 @@
+nacl open all connections only then its working- nope to check nc -vz postgres.local:5432
+also, sg open all connections only then its working
+also, in lb listener https with cert arn of api.deeplink.in
+also, update lb sg to allow https
+postgres data persistence
