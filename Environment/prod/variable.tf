@@ -404,3 +404,9 @@ variable "dbcreds_name" {
 variable "googleauth_name" {
   default = "prod/googleOauth"
 }
+variable "network_mode" {
+ default = "bridge"
+}
+variable "target_type" {
+ default = "instance"
+}

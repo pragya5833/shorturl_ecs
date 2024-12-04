@@ -1,7 +1,13 @@
-#to try: task placement strategy and task placement constraint.: binpack,spread and :distinctinstances,instancefamily etc 
+#to try: task placement strategy and task placement constraint.: binpack,spread and :distinctinstances,instancefamily etc --to
 #to try: capacity provider with asg in ecs..task autoscaling and instance autoscaling
 #to try : network mode bridge and target type instance
 #to try: secret from sm --done
+# understood:
+# target group ip then awsvpc but if target group type instance then network mode awsvpc does not work
+# with bridge network_mode we can't have network_configuration block in aws service and security group in ntweork config to be passed directly in launch template because eni of container is used and not of containers
+# when using target type instance then host port can be dynamic so security group should allow that range . so this condition if hostport not specified.
+# when using bridge network then we have to keep containername and containerport in task def and in service
+# when using bridge network service discovery must have SRV record type not A - but app doesn't handle SRV hence use awsvpc
 resource "aws_launch_template" "ecs_template" {
   name = "ecs-shorturl-launch-template"
   image_id = var.ami_id
@@ -243,9 +249,11 @@ resource "aws_ecs_task_definition" "postgres_task_definition" {
         readOnly      = false
       }
     ]
-    # portMappings = [
-    #   { containerPort = 5432 } # Add this to define the port
-    # ]
+    portMappings = [
+      { containerPort = 5432 
+        # hostPort      = 5432  # Add this line to fix the host port
+      } # Add this to define the port
+    ]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -430,6 +438,14 @@ resource "aws_security_group" "ecs_task_sg" {
     protocol    = "tcp"
     security_groups = [aws_security_group.alb_sg.id]
   }
+
+#   ingress {
+#     description = "Allow ALB traffic to Node.js"
+#     from_port   = 0
+#     to_port     = 65535
+#     protocol    = "tcp"
+#     security_groups = [aws_security_group.alb_sg.id]
+#   }
 
   egress {
     from_port   = 0
