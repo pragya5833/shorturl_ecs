@@ -24,7 +24,7 @@ resource "aws_launch_template" "ecs_template" {
     name = aws_iam_instance_profile.ecs_instance_profile.name
   }
   network_interfaces {
-    security_groups = [aws_security_group.ecs_public_sg.id]
+    security_groups = [aws_security_group.ecs_public_sg.id,aws_security_group.ecs_task_sg.id]
   }
   monitoring {
   enabled = true
@@ -136,7 +136,7 @@ resource "aws_ecs_cluster" "ecs_cluster" {
 resource "aws_ecs_task_definition" "nodejs_task_definition" {
   execution_role_arn = var.task_execution_role
   family = "nodeJsTask"
-  network_mode = "awsvpc"
+  network_mode = "bridge"
   requires_compatibilities = ["EC2"]
   container_definitions = jsonencode([{
     name="shorturl_backend"
@@ -306,11 +306,11 @@ resource "aws_ecs_service" "nodeJs_service" {
   desired_count   = 1
   launch_type     = "EC2"
 
-  network_configuration {
-    subnets          = var.private_subnet_ids
-    security_groups  = [aws_security_group.ecs_task_sg.id]
-    # assign_public_ip = true  # Set this based on whether your instances need direct internet access
-  }
+#   network_configuration {
+#     subnets          = var.private_subnet_ids
+#     security_groups  = [aws_security_group.ecs_task_sg.id]
+#     # assign_public_ip = true  # Set this based on whether your instances need direct internet access
+#   }
 
   load_balancer {
     target_group_arn = aws_lb_target_group.nodejs_target_group.arn
@@ -390,7 +390,7 @@ resource "aws_lb_target_group" "nodejs_target_group" {
   port     = 3000
   protocol = "HTTP"
   vpc_id   = var.vpc_id
-  target_type = "ip"  # Ensure target type is set to 'ip'
+  target_type = "instance"  # Ensure target type is set to 'ip'
 
   health_check {
     path                = "/health"
@@ -458,13 +458,13 @@ resource "aws_security_group" "ecs_task_sg" {
     security_groups = [aws_security_group.alb_sg.id]
   }
 
-#   ingress {
-#     description = "Allow ALB traffic to Node.js"
-#     from_port   = 0
-#     to_port     = 65535
-#     protocol    = "tcp"
-#     security_groups = [aws_security_group.alb_sg.id]
-#   }
+  ingress {
+    description = "Allow ALB traffic to Node.js"
+    from_port   = 0
+    to_port     = 65535
+    protocol    = "tcp"
+    security_groups = [aws_security_group.alb_sg.id]
+  }
 
   egress {
     from_port   = 0
