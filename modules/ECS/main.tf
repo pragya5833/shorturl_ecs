@@ -1,5 +1,5 @@
 #to try: task placement strategy and task placement constraint.: binpack,spread and :distinctinstances,instancefamily etc --to
-#to try: capacity provider with asg in ecs..task autoscaling and instance autoscaling
+#to try: capacity provider with asg in ecs..task autoscaling and instance autoscaling --to test 
 #to try : network mode bridge and target type instance
 #to try: secret from sm --done
 # understood:
@@ -7,7 +7,14 @@
 # with bridge network_mode we can't have network_configuration block in aws service and security group in ntweork config to be passed directly in launch template because eni of container is used and not of containers
 # when using target type instance then host port can be dynamic so security group should allow that range . so this condition if hostport not specified.
 # when using bridge network then we have to keep containername and containerport in task def and in service
-# when using bridge network service discovery must have SRV record type not A - but app doesn't handle SRV hence use awsvpc
+# when using bridge network service discovery must have SRV record type not A - but app doesn't handle SRV hence use awsvpc-- but confirm
+# Recommendation for ECS
+# For multi-host networking in ECS, the best approach is to use awsvpc network mode, as it provides:
+
+# Native support for multi-host communication.
+# Per-task ENIs (Elastic Network Interfaces) with private IPs.
+# Simplified security group management.
+# If you need Docker Swarm-like behavior, consider using EKS (Elastic Kubernetes Service), which provides better multi-host networking support with features like ClusterIP and LoadBalancer services.
 resource "aws_launch_template" "ecs_template" {
   name = "ecs-shorturl-launch-template"
   image_id = var.ami_id
@@ -19,6 +26,9 @@ resource "aws_launch_template" "ecs_template" {
   network_interfaces {
     security_groups = [aws_security_group.ecs_public_sg.id]
   }
+  monitoring {
+  enabled = true
+   }
   user_data = base64encode(templatefile(
     "${path.module}/user_data.sh",
     {
@@ -110,6 +120,15 @@ resource "aws_autoscaling_group" "ecs_autoscaling" {
   desired_capacity = 2
   max_size = 2
   min_size = 1
+  protect_from_scale_in = true
+
+}
+resource "aws_autoscaling_lifecycle_hook" "protect_instances" {
+  autoscaling_group_name = aws_autoscaling_group.ecs_autoscaling.name
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+  default_result         = "CONTINUE"
+  heartbeat_timeout      = 300
+  name                   = "scale-in-protection"
 }
 resource "aws_ecs_cluster" "ecs_cluster" {
   name = "shorturl-ecs-cluster"
@@ -480,6 +499,152 @@ resource "aws_security_group" "alb_sg" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_appautoscaling_target" "nodejs_service_target" {
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.ecs_cluster.name}/${aws_ecs_service.nodeJs_service.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  min_capacity       = 1
+  max_capacity       = 5
+}
+
+resource "aws_appautoscaling_policy" "nodejs_service_scale_up" {
+  name               = "scale-up"
+  resource_id        = aws_appautoscaling_target.nodejs_service_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.nodejs_service_target.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.nodejs_service_target.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      metric_interval_lower_bound = 0
+      scaling_adjustment          = 1
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "nodejs_service_scale_down" {
+  name               = "scale-down"
+  resource_id        = aws_appautoscaling_target.nodejs_service_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.nodejs_service_target.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.nodejs_service_target.service_namespace # Fixed reference
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      metric_interval_upper_bound = 0
+      scaling_adjustment          = -1
+    }
+  }
+}
+
+
+resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
+  alarm_name                = "ecs-cpu-high"
+  comparison_operator       = "GreaterThanThreshold"
+  evaluation_periods        = 2
+  metric_name               = "CPUUtilization"
+  namespace                 = "AWS/ECS"
+  statistic                 = "Average"
+  period                    = 300
+  threshold                 = 70
+  alarm_description         = "Alarm when CPU exceeds 70%"
+  dimensions = {
+    ClusterName = aws_ecs_cluster.ecs_cluster.name
+  }
+  actions_enabled           = true
+  alarm_actions             = [aws_appautoscaling_policy.nodejs_service_scale_up.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_cpu_low" {
+  alarm_name                = "ecs-cpu-low"
+  comparison_operator       = "LessThanThreshold"
+  evaluation_periods        = 2
+  metric_name               = "CPUUtilization"
+  namespace                 = "AWS/ECS"
+  statistic                 = "Average"
+  period                    = 300
+  threshold                 = 30
+  alarm_description         = "Alarm when CPU falls below 30%"
+  dimensions = {
+    ClusterName = aws_ecs_cluster.ecs_cluster.name
+  }
+  actions_enabled           = true
+  alarm_actions             = [aws_appautoscaling_policy.nodejs_service_scale_down.arn]
+}
+resource "aws_autoscaling_policy" "scale_out_policy" {
+  name                   = "scale-out"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
+  autoscaling_group_name = aws_autoscaling_group.ecs_autoscaling.name
+}
+
+resource "aws_autoscaling_policy" "scale_in_policy" {
+  name                   = "scale-in"
+  scaling_adjustment     = -1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
+  autoscaling_group_name = aws_autoscaling_group.ecs_autoscaling.name
+}
+
+resource "aws_cloudwatch_metric_alarm" "ec2_cluster_high_cpu" {
+  alarm_name                = "ec2-cluster-high-cpu"
+  comparison_operator       = "GreaterThanThreshold"
+  evaluation_periods        = 2
+  metric_name               = "CPUUtilization"
+  namespace                 = "AWS/EC2"
+  statistic                 = "Average"
+  period                    = 300
+  threshold                 = 65
+  alarm_actions             = [aws_autoscaling_policy.scale_out_policy.arn]
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ecs_autoscaling.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ec2_cluster_low_cpu" {
+  alarm_name                = "ec2-cluster-low-cpu"
+  comparison_operator       = "LessThanThreshold"
+  evaluation_periods        = 2
+  metric_name               = "CPUUtilization"
+  namespace                 = "AWS/EC2"
+  statistic                 = "Average"
+  period                    = 300
+  threshold                 = 30
+  alarm_actions             = [aws_autoscaling_policy.scale_in_policy.arn]
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ecs_autoscaling.name
+  }
+}
+resource "aws_ecs_capacity_provider" "ecs_capacity_provider" {
+  name = "my-capacity-provider"
+  auto_scaling_group_provider {
+    auto_scaling_group_arn         = aws_autoscaling_group.ecs_autoscaling.arn
+    managed_scaling {
+      status                = "ENABLED"
+      target_capacity       = 75
+      minimum_scaling_step_size = 1
+      maximum_scaling_step_size = 5
+    }
+    managed_termination_protection = "ENABLED"
+  }
+}
+
+resource "aws_ecs_cluster_capacity_providers" "ecs_cluster_capacity_providers" {
+  cluster_name       = aws_ecs_cluster.ecs_cluster.name
+  capacity_providers = [aws_ecs_capacity_provider.ecs_capacity_provider.name]
+  default_capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.ecs_capacity_provider.name
+    weight            = 1
   }
 }
 
